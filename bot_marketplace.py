@@ -7,25 +7,24 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 
 # --- CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
-# Esto garantiza que el bot encuentre los archivos sin importar dónde lo ejecute Render
+# Garantiza que el bot encuentre los archivos en el entorno de Linux de Render
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
 LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
 
-# --- SISTEMA DE LOGS PARA EL DASHBOARD ---
+# --- SISTEMA DE LOGS MANUAL (AJUSTE PREVENTIVO) ---
+# Evita errores de 'fileno' y permite que el Dashboard lea el progreso
 def log(mensaje):
-    """Escribe logs en consola y en el archivo que lee el Dashboard."""
     timestamp = time.strftime("%H:%M:%S")
     texto = f"[{timestamp}] {mensaje}"
-    print(texto, flush=True)  # Se ve en los logs de Render
+    print(texto, flush=True)  # Se visualiza en los logs de la consola de Render
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(texto + "\n")
     except Exception as e:
-        print(f"Error escribiendo log en archivo: {e}")
+        print(f"Error escribiendo log: {e}")
 
-# --- CONFIGURACIÓN DE PUSHOVER ---
-# Estas variables se configuran en la pestaña 'Environment' de Render
+# --- VARIABLES DE ENTORNO ---
 USER_KEY = os.getenv("USER_KEY")
 API_TOKEN = os.getenv("API_TOKEN")
 
@@ -62,14 +61,14 @@ def guardar_oferta(id_item, titulo, precio, precio_num):
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        return False # El producto ya estaba registrado
+        return False 
     finally:
         conn.close()
 
-# --- NOTIFICACIONES ---
+# --- NOTIFICACIONES PUSHOVER ---
 def enviar_notificacion(titulo, precio, url_item):
     if not USER_KEY or not API_TOKEN:
-        log("⚠️ No se enviará notificación: Llaves de Pushover no configuradas.")
+        log("⚠️ Llaves de Pushover no configuradas en Environment de Render.")
         return
     
     payload = {
@@ -82,32 +81,30 @@ def enviar_notificacion(titulo, precio, url_item):
     }
     try:
         requests.post("https://api.pushover.net/1/messages.json", data=payload)
-        log(f"🔔 Notificación enviada al celular: {titulo}")
+        log(f"🔔 Notificación enviada: {titulo}")
     except Exception as e:
         log(f"❌ Error Pushover: {e}")
 
-# --- LÓGICA DEL SCRAPER ---
+# --- SCRAPER PRINCIPAL ---
 def ejecutar_escaneo():
-    log(f"🔎 Iniciando ronda de escaneo para: {PRODUCTO}")
+    log(f"🔎 Escaneando: {PRODUCTO}")
     
     with sync_playwright() as p:
-        # Render ya tiene Chromium instalado gracias al Build Command
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
         )
         page = context.new_page()
-        stealth_sync(page) # Evita bloqueos de Facebook
+        stealth_sync(page) # Protege contra bloqueos de Facebook
         
         try:
             page.goto(URL_BUSQUEDA, wait_until="networkidle", timeout=60000)
-            # Esperar a que cargue el primer contenedor de productos
             page.wait_for_selector('div[style*="max-width: 381px"]', timeout=20000)
             
             items = page.query_selector_all('div[style*="max-width: 381px"]')
-            log(f"📊 Se detectaron {len(items)} posibles ofertas.")
+            log(f"📊 {len(items)} ofertas encontradas en página.")
 
-            for item in items[:12]: # Analizamos las 12 primeras
+            for item in items[:10]:
                 try:
                     raw_text = item.inner_text().split('\n')
                     if len(raw_text) < 2: continue
@@ -123,23 +120,23 @@ def ejecutar_escaneo():
                         item_id = clean_url.split('/')[-2]
                         
                         if guardar_oferta(item_id, nombre, precio_str, precio_int):
-                            log(f"✅ ¡NUEVO!: {nombre} - {precio_str}")
+                            log(f"✅ ¡NUEVO!: {nombre}")
                             enviar_notificacion(nombre, precio_str, clean_url)
                 except: continue
                 
         except Exception as e:
-            log(f"⚠️ Error en página: {e}")
+            log(f"⚠️ Error de navegación: {e}")
         finally:
             browser.close()
-            log("😴 Escaneo terminado. Esperando 5 minutos...")
+            log("😴 Fin de ronda. Esperando 5 minutos...")
 
-# --- BUCLE INFINITO ---
+# --- INICIO ---
 if __name__ == "__main__":
     inicializar_db()
-    log("🚀 BOT ONLINE - Monitoreando Marketplace 24/7")
+    log("🚀 BOT ACTIVADO")
     while True:
         try:
             ejecutar_escaneo()
         except Exception as e:
             log(f"❌ Error crítico: {e}")
-        time.sleep(300) # 5 minutos entre cada revisión
+        time.sleep(300)
