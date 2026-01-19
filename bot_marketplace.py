@@ -7,10 +7,19 @@ import random
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
 LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
+
+# --- TUS PROXIES DE WEBSHARE ---
+PROXIES_WEBSHARE = [
+    "142.111.48.253:7030", "23.95.150.145:6114", "198.23.239.134:6540",
+    "107.172.163.27:6543", "198.105.121.200:6462", "64.137.96.74:6641",
+    "84.247.60.125:6095", "216.10.27.159:6837", "23.26.71.145:5628",
+    "23.27.208.120:5830"
+]
+PROXY_AUTH = {"user": "agfizjph", "pass": "y375ph2ovvo2"}
 
 def log(mensaje):
     timestamp = time.strftime("%H:%M:%S")
@@ -21,10 +30,9 @@ def log(mensaje):
             f.write(texto + "\n")
     except: pass
 
-# --- VARIABLES DE ENTORNO (Configurar en Render) ---
+# --- VARIABLES DE ENTORNO ---
 USER_KEY = os.getenv("USER_KEY")
 API_TOKEN = os.getenv("API_TOKEN")
-
 PRODUCTO = "bicicleta"
 URL_BUSQUEDA = f"https://www.facebook.com/marketplace/search/?query={PRODUCTO}"
 
@@ -37,21 +45,19 @@ def inicializar_db():
     conn.commit()
     conn.close()
 
-def enviar_notificacion(titulo, precio, url_item):
-    if not USER_KEY or not API_TOKEN: return
-    payload = {
-        "token": API_TOKEN, "user": USER_KEY,
-        "message": f"💰 {precio}\n📦 {titulo}",
-        "title": "✨ ¡OFERTA DETECTADA!",
-        "url": url_item
-    }
-    try: requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
-    except: pass
-
 def ejecutar_escaneo():
-    log(f"🔎 Iniciando escaneo de {PRODUCTO}...")
+    proxy_elegido = random.choice(PROXIES_WEBSHARE)
+    log(f"🔎 Escaneo iniciado con Proxy: {proxy_elegido}")
+    
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            proxy={
+                "server": f"http://{proxy_elegido}",
+                "username": PROXY_AUTH["user"],
+                "password": PROXY_AUTH["pass"]
+            }
+        )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 800}
@@ -60,42 +66,40 @@ def ejecutar_escaneo():
         stealth_sync(page)
         
         try:
-            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=90000)
-            time.sleep(10)
+            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=120000)
+            log("🌐 Contenido recibido. Procesando...")
+            time.sleep(15) # Tiempo para renderizado dinámico
             
-            log("📜 Realizando scroll progresivo para cargar datos...")
-            for _ in range(4):
-                page.mouse.wheel(0, 800)
-                time.sleep(3)
+            page.mouse.wheel(0, 1500)
+            time.sleep(5)
             
-            # Extracción por Regex de IDs de Marketplace
             html_content = page.content()
             items_encontrados = re.findall(r'item/(\d{10,})', html_content)
             items_unicos = list(set(items_encontrados))
             
             log(f"📊 IDs detectados: {len(items_unicos)}")
 
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            for item_id in items_unicos[:10]:
-                url_completa = f"https://www.facebook.com/marketplace/item/{item_id}/"
-                try:
-                    cursor.execute("INSERT INTO ofertas VALUES (?,?,?,?,?)", 
-                                 (item_id, f"Bicicleta {item_id}", "Ver en Link", 0, time.strftime('%Y-%m-%d %H:%M:%S')))
-                    conn.commit()
-                    log(f"✅ NUEVO: {item_id}")
-                    enviar_notificacion(f"Bicicleta Detectada", f"ID: {item_id}", url_completa)
-                except sqlite3.IntegrityError: pass 
-            conn.close()
+            if len(items_unicos) > 0:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                for item_id in items_unicos[:10]:
+                    try:
+                        cursor.execute("INSERT INTO ofertas VALUES (?,?,?,?,?)", 
+                                     (item_id, f"Bicicleta {item_id}", "Ver Link", 0, time.strftime('%Y-%m-%d %H:%M:%S')))
+                        conn.commit()
+                        log(f"✅ REGISTRADO: {item_id}")
+                    except sqlite3.IntegrityError: pass 
+                conn.close()
                 
-        except Exception as e: log(f"⚠️ Error: {e}")
+        except Exception as e:
+            log(f"⚠️ Error en ronda: {e}")
         finally:
             browser.close()
             log("😴 Fin de ronda.")
 
 if __name__ == "__main__":
     inicializar_db()
-    log("🚀 BOT ONLINE")
+    log("🚀 BOT ACTIVADO")
     while True:
         ejecutar_escaneo()
         time.sleep(300)
