@@ -3,29 +3,54 @@ import sqlite3
 import pandas as pd
 import subprocess
 import os
+import sys
 
-# --- CONFIGURACIÓN DE INICIO PARA RENDER ---
-# Esto asegura que el bot de escaneo se ejecute en segundo plano junto con el Dashboard
+# --- CONFIGURACIÓN PARA RENDER (AUTO-INSTALACIÓN) ---
+def asegurar_navegador():
+    # Solo intentamos instalar si estamos en el entorno de Render
+    if "RENDER" in os.environ or "/opt/render" in os.getcwd():
+        try:
+            # Verificamos si ya intentamos instalar en esta sesión para no repetir
+            if "browser_installed" not in st.session_state:
+                st.info("Configurando entorno del bot en la nube... (Esto ocurre solo una vez)")
+                # Forzamos la instalación de Chromium
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                st.session_state["browser_installed"] = True
+        except Exception as e:
+            st.error(f"Error instalando navegador en la nube: {e}")
+
+# Ejecutamos la verificación
+asegurar_navegador()
+
+# --- INICIO DEL BOT EN SEGUNDO PLANO ---
 if "BOT_RUNNING" not in st.session_state:
     st.session_state["BOT_RUNNING"] = True
     try:
-        # Iniciamos el proceso del bot de manera independiente
-        subprocess.Popen(["python", "bot_marketplace.py"])
+        # Iniciamos el bot de marketplace
+        subprocess.Popen([sys.executable, "bot_marketplace.py"])
     except Exception as e:
-        st.error(f"No se pudo iniciar el bot en segundo plano: {e}")
+        st.error(f"No se pudo iniciar el bot: {e}")
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Monitor Marketplace LATAM", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="Monitor Marketplace v2.5", page_icon="🚀", layout="wide")
 
-st.title("📊 Panel de Control - Ofertas Detectadas")
-st.markdown("Revisa el historial de capturas de tu bot y filtra las mejores oportunidades.")
+# Estilo personalizado para el Dashboard
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- FUNCIÓN PARA LEER LA BASE DE DATOS ---
+st.title("📊 Panel de Control - Monitor Marketplace")
+st.markdown("Plataforma de monitoreo en tiempo real para revendedores profesionales.")
+
+# --- GESTIÓN DE BASE DE DATOS ---
 def cargar_datos():
     conn = sqlite3.connect('marketplace_monitor.db')
     cursor = conn.cursor()
     
-    # PROTECCIÓN: Crea la tabla si no existe (evita el error 'no such table')
+    # Aseguramos que la tabla exista siempre
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ofertas (
             id TEXT PRIMARY KEY,
@@ -40,70 +65,78 @@ def cargar_datos():
     try:
         query = "SELECT fecha_deteccion, titulo, precio, precio_num, id FROM ofertas ORDER BY fecha_deteccion DESC"
         df = pd.read_sql_query(query, conn)
-    except Exception as e:
-        st.error(f"Error al leer los datos: {e}")
+    except:
         df = pd.DataFrame(columns=['fecha_deteccion', 'titulo', 'precio', 'precio_num', 'id'])
     
     conn.close()
     return df
 
-# --- CARGA Y FILTRADO ---
+# Carga de datos
 df = cargar_datos()
 
-# Sidebar para filtros
-st.sidebar.header("Filtros de Búsqueda")
-busqueda = st.sidebar.text_input("Buscar por nombre (ej: iPhone, Suzuki)")
+# --- BARRA LATERAL (FILTROS) ---
+st.sidebar.header("⚙️ Configuración y Filtros")
+busqueda = st.sidebar.text_input("Filtrar por nombre:", placeholder="Ej: auto, iphone...")
 
-# Determinamos el precio máximo para el slider de forma segura
-max_p_actual = int(df['precio_num'].max()) if not df.empty and pd.notnull(df['precio_num'].max()) else 5000000
-precio_max = st.sidebar.slider("Precio Máximo", 0, max_p_actual, max_p_actual)
+# Calcular precio máximo de forma dinámica
+if not df.empty and pd.notnull(df['precio_num'].max()):
+    max_slider = int(df['precio_num'].max())
+else:
+    max_slider = 5000000
 
-# Aplicar filtros al DataFrame
+precio_max = st.sidebar.slider("Presupuesto Máximo ($)", 0, max_slider, max_slider)
+
+# Aplicar lógica de filtros
 df_filtrado = df.copy()
 if not df.empty:
     df_filtrado = df_filtrado[df_filtrado['precio_num'] <= precio_max]
     if busqueda:
         df_filtrado = df_filtrado[df_filtrado['titulo'].str.contains(busqueda, case=False)]
 
-# --- MÉTRICAS RÁPIDAS ---
+# --- DASHBOARD DE MÉTRICAS ---
 col1, col2, col3 = st.columns(3)
 
-# Total Histórico
-total_detectados = len(df)
-col1.metric("Total Detectados", total_detectados)
+with col1:
+    st.metric("📦 Total Detectados", len(df))
 
-# Hallazgos de Hoy
-hoy_str = pd.Timestamp.now().strftime('%Y-%m-%d')
-hoy_detectados = len(df[df['fecha_deteccion'].str.contains(hoy_str)]) if not df.empty else 0
-col2.metric("Encontrados Hoy", hoy_detectados)
+with col2:
+    hoy = pd.Timestamp.now().strftime('%Y-%m-%d')
+    encontrados_hoy = len(df[df['fecha_deteccion'].str.contains(hoy)]) if not df.empty else 0
+    st.metric("✨ Encontrados Hoy", encontrados_hoy)
 
-# Precio Promedio (con protección contra NaN)
-if not df_filtrado.empty:
-    promedio = int(df_filtrado['precio_num'].mean())
-else:
-    promedio = 0
-col3.metric("Precio Promedio", f"${promedio:,}")
+with col3:
+    if not df_filtrado.empty:
+        promedio = int(df_filtrado['precio_num'].mean())
+    else:
+        promedio = 0
+    st.metric("💰 Precio Promedio", f"${promedio:,}")
 
-# --- LISTADO DE OPORTUNIDADES ---
-st.subheader("Listado de Oportunidades")
+st.divider()
+
+# --- TABLA DE RESULTADOS ---
+st.subheader("📋 Listado de Ofertas Activas")
 
 if df_filtrado.empty:
-    st.info("Aún no hay ofertas registradas que coincidan con los filtros. El bot está trabajando...")
+    st.warning("No se han encontrado ofertas aún. El bot está escaneando Marketplace en este momento...")
 else:
-    # Formateamos para mostrar
-    df_display = df_filtrado.copy()
-    df_display.columns = ['Fecha', 'Producto', 'Precio Texto', 'Precio ($)', 'Link a Facebook']
+    # Formatear el DataFrame para la vista del usuario
+    df_vista = df_filtrado.copy()
+    df_vista.columns = ['Fecha Captura', 'Producto', 'Precio (Texto)', 'Precio Numérico', 'URL Marketplace']
     
     st.dataframe(
-        df_display,
+        df_vista,
         column_config={
-            "Link a Facebook": st.column_config.LinkColumn("Ver en Marketplace"),
-            "Precio ($)": st.column_config.NumberColumn(format="$%d")
+            "URL Marketplace": st.column_config.LinkColumn("Abrir en Facebook 🔗"),
+            "Precio Numérico": st.column_config.NumberColumn(format="$%d"),
+            "Fecha Captura": st.column_config.TextColumn(width="medium")
         },
         hide_index=True,
         use_container_width=True
     )
 
-# Botón manual para refrescar datos
-if st.button("🔄 Actualizar Datos"):
+# --- BOTÓN DE ACTUALIZACIÓN ---
+if st.button("🔄 Refrescar Panel"):
     st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.info("Bot operando 24/7 en la nube.")
