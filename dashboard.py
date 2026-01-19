@@ -4,7 +4,7 @@ import pandas as pd
 import os
 
 # --- CONFIGURACIÓN DE SEGURIDAD ---
-ADMIN_PASSWORD = "TU_CONTRASEÑA_AQUI"  # <--- CAMBIA ESTO
+ADMIN_PASSWORD = "1234"  # <--- CAMBIA ESTO
 
 st.set_page_config(page_title="Marketplace Monitor Pro", layout="wide")
 
