@@ -3,7 +3,7 @@ import sys
 import time
 import sqlite3
 import requests
-import random
+import re
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 
@@ -46,74 +46,67 @@ def enviar_notificacion(titulo, precio, url_item):
         "title": "✨ ¡OFERTA DETECTADA!",
         "url": url_item
     }
-    requests.post("https://api.pushover.net/1/messages.json", data=payload)
+    try:
+        requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
+    except: pass
 
 def ejecutar_escaneo():
-    log(f"🔎 Iniciando escaneo profundo de {PRODUCTO}...")
+    log(f"🔎 Escaneo por patrones iniciado para: {PRODUCTO}...")
     
     with sync_playwright() as p:
-        # Usamos un contexto persistente para engañar a Facebook
-        user_data_dir = os.path.join(BASE_DIR, "user_data")
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir,
-            headless=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        # Lanzamiento estándar sin carpetas persistentes para evitar errores en Render
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800}
         )
-        page = browser.pages[0]
+        page = context.new_page()
         stealth_sync(page)
         
         try:
-            page.goto(URL_BUSQUEDA, wait_until="networkidle", timeout=90000)
+            # 1. Carga de página
+            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=90000)
+            time.sleep(10) # Tiempo para que cargue el contenido dinámico
             
-            # Simulación de lectura humana
-            for _ in range(3):
-                page.mouse.wheel(0, random.randint(700, 1000))
-                time.sleep(random.uniform(3, 5))
+            # 2. Scroll para activar carga de más contenido
+            page.mouse.wheel(0, 2000)
+            time.sleep(5)
             
-            # Captura de emergencia para ver qué ve el bot (revisa esto en tu Dashboard si falla)
-            page.screenshot(path=os.path.join(BASE_DIR, "debug.png"))
+            # 3. EXTRACCIÓN POR PATRONES (REGEX)
+            # Buscamos IDs de 15 o más dígitos que Facebook usa para sus items
+            html_content = page.content()
+            items_encontrados = re.findall(r'/marketplace/item/(\d{10,})/', html_content)
+            items_unicos = list(set(items_encontrados))
+            
+            log(f"📊 IDs detectados en el código: {len(items_unicos)}")
 
-            # Buscamos todos los enlaces que contienen ofertas
-            enlaces = page.query_selector_all('a[href*="/item/"]')
-            log(f"📊 Se detectaron {len(enlaces)} posibles ofertas.")
-
-            for link in enlaces[:12]:
+            for item_id in items_unicos[:10]:
+                url_completa = f"https://www.facebook.com/marketplace/item/{item_id}/"
+                
+                # Intentamos guardar en la base de datos
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
                 try:
-                    texto_completo = link.inner_text()
-                    if "$" not in texto_completo: continue
-                    
-                    lineas = texto_completo.split('\n')
-                    precio_str = next((l for l in lineas if "$" in l), "Consultar")
-                    titulo = next((l for l in lineas if len(l) > 5 and "$" not in l), "Producto")
-                    
-                    href = link.get_attribute('href')
-                    url_limpia = f"https://www.facebook.com{href.split('?')[0]}"
-                    item_id = url_limpia.strip('/').split('/')[-1]
-                    
-                    precio_int = int(''.join(filter(str.isdigit, precio_str)))
-                    
-                    # Guardar en DB
-                    conn = sqlite3.connect(DB_PATH)
-                    cursor = conn.cursor()
-                    try:
-                        cursor.execute("INSERT INTO ofertas VALUES (?,?,?,?,?)", 
-                                     (item_id, titulo, precio_str, precio_int, time.strftime('%Y-%m-%d %H:%M:%S')))
-                        conn.commit()
-                        log(f"✅ NUEVO: {titulo} - {precio_str}")
-                        enviar_notificacion(titulo, precio_str, url_limpia)
-                    except: pass
-                    finally: conn.close()
-                except: continue
+                    # Como no tenemos el título aún, ponemos un genérico o el ID
+                    cursor.execute("INSERT INTO ofertas VALUES (?,?,?,?,?)", 
+                                 (item_id, f"Oferta {item_id}", "Ver Link", 0, time.strftime('%Y-%m-%d %H:%M:%S')))
+                    conn.commit()
+                    log(f"✅ ¡NUEVO ID!: {item_id}")
+                    enviar_notificacion(f"Bicicleta Detectada ({item_id})", "Revisar en FB", url_completa)
+                except sqlite3.IntegrityError:
+                    pass # Ya existe
+                finally:
+                    conn.close()
                 
         except Exception as e:
-            log(f"⚠️ Error en esta ronda: {e}")
+            log(f"⚠️ Error en ronda: {e}")
         finally:
             browser.close()
-            log("😴 Esperando 5 minutos para la próxima ronda.")
+            log("😴 Ronda terminada. Esperando 5 minutos.")
 
 if __name__ == "__main__":
     inicializar_db()
-    log("🚀 BOT ONLINE")
+    log("🚀 BOT ONLINE - Modo Patrones")
     while True:
         ejecutar_escaneo()
         time.sleep(300)
