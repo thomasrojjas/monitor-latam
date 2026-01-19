@@ -1,0 +1,12 @@
+# Entorno virtual
+venv/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+
+# Archivos de configuración sensible (Tus llaves)
+.env
+
+# Base de datos local
+marketplace_monitor.db
