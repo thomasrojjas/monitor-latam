@@ -7,17 +7,15 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 
 # --- CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
-# Garantiza que el bot encuentre los archivos en el entorno de Linux de Render
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
 LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
 
-# --- SISTEMA DE LOGS MANUAL (AJUSTE PREVENTIVO) ---
-# Evita errores de 'fileno' y permite que el Dashboard lea el progreso
+# --- SISTEMA DE LOGS ---
 def log(mensaje):
     timestamp = time.strftime("%H:%M:%S")
     texto = f"[{timestamp}] {mensaje}"
-    print(texto, flush=True)  # Se visualiza en los logs de la consola de Render
+    print(texto, flush=True)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(texto + "\n")
@@ -34,7 +32,7 @@ PRECIO_MIN = 30000
 PRECIO_MAX = 200000
 URL_BUSQUEDA = f"https://www.facebook.com/marketplace/category/search?query={PRODUCTO}&minPrice={PRECIO_MIN}&maxPrice={PRECIO_MAX}&exact=false"
 
-# --- FUNCIONES DE BASE DE DATOS ---
+# --- BASE DE DATOS ---
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -65,10 +63,10 @@ def guardar_oferta(id_item, titulo, precio, precio_num):
     finally:
         conn.close()
 
-# --- NOTIFICACIONES PUSHOVER ---
+# --- NOTIFICACIONES ---
 def enviar_notificacion(titulo, precio, url_item):
     if not USER_KEY or not API_TOKEN:
-        log("⚠️ Llaves de Pushover no configuradas en Environment de Render.")
+        log("⚠️ Llaves de Pushover no configuradas.")
         return
     
     payload = {
@@ -85,42 +83,61 @@ def enviar_notificacion(titulo, precio, url_item):
     except Exception as e:
         log(f"❌ Error Pushover: {e}")
 
-# --- SCRAPER PRINCIPAL ---
+# --- SCRAPER CON MEJORA DE SELECTORES ---
 def ejecutar_escaneo():
     log(f"🔎 Escaneando: {PRODUCTO}")
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
-        stealth_sync(page) # Protege contra bloqueos de Facebook
+        stealth_sync(page)
         
         try:
-            page.goto(URL_BUSQUEDA, wait_until="networkidle", timeout=60000)
-            page.wait_for_selector('div[style*="max-width: 381px"]', timeout=20000)
+            # Carga con tiempo de espera extendido
+            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=60000)
             
-            items = page.query_selector_all('div[style*="max-width: 381px"]')
-            log(f"📊 {len(items)} ofertas encontradas en página.")
+            # Scroll para activar la carga de productos (Lazy Load)
+            log("📜 Realizando scroll para cargar contenido...")
+            page.mouse.wheel(0, 800)
+            time.sleep(5)
+            
+            # Intentar esperar a que aparezca cualquier texto con "$" (indica que hay precios)
+            page.wait_for_selector('span:has-text("$")', timeout=30000)
+            
+            # Selector más robusto: buscamos los enlaces que contienen las imágenes y textos
+            items = page.query_selector_all('div[role="main"] a[role="link"]')
+            
+            if not items:
+                # Fallback: intentar un selector alternativo si el primero falla
+                items = page.query_selector_all('div[style*="max-width"] a[href*="/item/"]')
+            
+            log(f"📊 {len(items)} posibles ofertas detectadas.")
 
-            for item in items[:10]:
+            for item in items[:15]:
                 try:
                     raw_text = item.inner_text().split('\n')
+                    # Buscamos un formato donde el precio suele ser el primer o segundo elemento
                     if len(raw_text) < 2: continue
                     
-                    precio_str = raw_text[0]
-                    nombre = raw_text[1]
+                    # El precio suele contener "$"
+                    precio_str = next((t for t in raw_text if "$" in t), None)
+                    # El nombre suele ser el texto largo después del precio
+                    nombre = next((t for t in raw_text if len(t) > 3 and "$" not in t), "Producto sin nombre")
+                    
+                    if not precio_str: continue
+                    
                     precio_int = int(''.join(filter(str.isdigit, precio_str)))
                     
-                    link_elem = item.query_selector('a')
-                    if link_elem:
-                        href = link_elem.get_attribute('href')
+                    href = item.get_attribute('href')
+                    if href:
                         clean_url = f"https://www.facebook.com{href.split('?')[0]}"
-                        item_id = clean_url.split('/')[-2]
+                        item_id = clean_url.split('/')[-2] if '/item/' in clean_url else clean_url.split('/')[-1]
                         
                         if guardar_oferta(item_id, nombre, precio_str, precio_int):
-                            log(f"✅ ¡NUEVO!: {nombre}")
+                            log(f"✅ ¡NUEVO!: {nombre} ({precio_str})")
                             enviar_notificacion(nombre, precio_str, clean_url)
                 except: continue
                 
@@ -130,7 +147,7 @@ def ejecutar_escaneo():
             browser.close()
             log("😴 Fin de ronda. Esperando 5 minutos...")
 
-# --- INICIO ---
+# --- BUCLE PRINCIPAL ---
 if __name__ == "__main__":
     inicializar_db()
     log("🚀 BOT ACTIVADO")
