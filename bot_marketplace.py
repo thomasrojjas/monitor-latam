@@ -1,32 +1,52 @@
-import time
-import requests
 import os
+import sys
+import time
 import sqlite3
-import urllib.parse
-import re # Para limpiar los precios de forma profesional
-from dotenv import load_dotenv
+import pandas as pd
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
+import requests
 
-load_dotenv()
+# --- CONFIGURACIÓN DE REDIRECCIÓN DE LOGS PARA RENDER ---
+# Esto permite que el Dashboard lea lo que el bot está haciendo
+sys.stdout = open("bot_log.txt", "a", buffering=1)
+sys.stderr = sys.stdout
+
+def log(mensaje):
+    """Imprime un mensaje con timestamp y fuerza la escritura en el archivo"""
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] {mensaje}", flush=True)
+
+# --- VARIABLES DE ENTORNO (CONFIGURADAS EN RENDER) ---
 USER_KEY = os.getenv("USER_KEY")
 API_TOKEN = os.getenv("API_TOKEN")
 
-# --- CONFIGURACIÓN DE NEGOCIO ---
-# Añadimos min_price para evitar los precios de fantasía ($1, $123, etc)
-PRODUCTOS_A_BUSCAR = [
-    {"query": "auto 2016", "min_price": 500000, "max_price": 5000000}, 
-    {"query": "ps5", "min_price": 200000, "max_price": 450000},
-    {"query": "tarjeta grafica", "min_price": 50000, "max_price": 350000},
-    {"query": "ipad", "min_price": 80000, "max_price": 300000},
-    {"query": "bicicleta", "min_price": 30000, "max_price": 200000}
-]
+# --- CONFIGURACIÓN DE BÚSQUEDA ---
+PRODUCTO = "bicicleta" # Puedes cambiarlo o hacerlo dinámico luego
+PRECIO_MIN = 30000
+PRECIO_MAX = 200000
+URL_BUSQUEDA = f"https://www.facebook.com/marketplace/category/search?query={PRODUCTO}&minPrice={PRECIO_MIN}&maxPrice={PRECIO_MAX}&exact=false"
 
-PALABRAS_NEGATIVAS = ["busco", "permuto", "repuesto", "arreglo", "compro", "bloqueado", "desbloqueo", "condiciones"]
-
-def limpiar_precio(texto_precio):
-    """Extrae solo los números de un texto como '$4.500.000' y lo convierte en entero."""
-    solo_numeros = re.sub(r'[^\d]', '', texto_precio)
-    return int(solo_numeros) if solo_numeros else 0
+# --- FUNCIONES DEL SISTEMA ---
+def enviar_pushover(titulo, precio, url_item):
+    if not USER_KEY or not API_TOKEN:
+        log("⚠️ Error: No se configuraron las llaves de Pushover.")
+        return
+    
+    mensaje = f"💰 {precio}\n📦 {titulo}"
+    data = {
+        "token": API_TOKEN,
+        "user": USER_KEY,
+        "message": mensaje,
+        "title": "✨ ¡OFERTA DETECTADA!",
+        "url": url_item,
+        "url_title": "Ver en Marketplace"
+    }
+    try:
+        requests.post("https://api.pushover.net/1/messages.json", data=data)
+        log(f"🔔 Notificación enviada: {titulo}")
+    except Exception as e:
+        log(f"❌ Error al enviar notificación: {e}")
 
 def inicializar_db():
     conn = sqlite3.connect('marketplace_monitor.db')
@@ -43,92 +63,76 @@ def inicializar_db():
     conn.commit()
     conn.close()
 
-def es_nuevo(id_unico, titulo, precio, precio_num):
+def guardar_oferta(id_item, titulo, precio, precio_num):
     conn = sqlite3.connect('marketplace_monitor.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM ofertas WHERE id = ?', (id_unico,))
-    if cursor.fetchone() is None:
+    try:
         cursor.execute('''
-            INSERT INTO ofertas (id, titulo, precio, precio_num, fecha_deteccion) 
+            INSERT INTO ofertas (id, titulo, precio, precio_num, fecha_deteccion)
             VALUES (?, ?, ?, ?, ?)
-        ''', (id_unico, titulo, precio, precio_num, time.strftime('%Y-%m-%d %H:%M:%S')))
+        ''', (id_item, titulo, precio, precio_num, time.strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
-        conn.close()
         return True
-    conn.close()
-    return False
+    except sqlite3.IntegrityError:
+        return False # Ya existe
+    finally:
+        conn.close()
 
-def enviar_push(titulo, precio, url_producto):
-    url_api = "https://api.pushover.net/1/messages.json"
-    data = {
-        "token": API_TOKEN,
-        "user": USER_KEY,
-        "message": f"💰 Precio: {precio}\n🔍 Producto: {titulo}",
-        "title": "🚀 ¡OFERTA REAL DETECTADA!",
-        "url": url_producto
-    }
-    requests.post(url_api, data=data)
-
-def monitorear():
+# --- LÓGICA PRINCIPAL DEL SCRAPER ---
+def escanear():
+    log(f"🚀 Iniciando escaneo de: {PRODUCTO} (Rango: ${PRECIO_MIN} - ${PRECIO_MAX})")
+    
     with sync_playwright() as p:
+        # Usamos chromium ya instalado en Render
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0...")
+        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         page = context.new_page()
-
-        for item in PRODUCTOS_A_BUSCAR:
-            query = item['query']
-            min_p = item['min_price']
-            max_p = item['max_price']
-            
-            query_encoded = urllib.parse.quote(query)
-            url = f"https://www.facebook.com/marketplace/116407435040092/search?minPrice={min_p}&maxPrice={max_p}&query={query_encoded}&exact=false"
-            
-            print(f"[{time.strftime('%H:%M:%S')}] Escaneando: {query} (Rango: ${min_p} - ${max_p})...")
-            try:
-                page.goto(url, timeout=60000)
-                page.wait_for_timeout(6000)
-                page.keyboard.press("Escape")
-                
-                anuncios = page.query_selector_all('a[href*="/marketplace/item/"]')
-
-                for anuncio in anuncios:
-                    try:
-                        info = anuncio.inner_text().split('\n')
-                        href = anuncio.get_attribute('href')
-                        link = f"https://www.facebook.com{href}" if href.startswith('/') else href
-
-                        # Identificar precio y título
-                        precio_texto = next((l for l in info if "$" in l), "0")
-                        precio_numerico = limpiar_precio(precio_texto)
-                        
-                        titulo = "Sin título"
-                        for linea in info:
-                            if len(linea) > 8 and "$" not in linea:
-                                titulo = linea
-                                break
-
-                        # FILTRO 1: ¿Está dentro del rango de precio real?
-                        if precio_numerico < min_p or precio_numerico > max_p:
-                            continue
-
-                        # FILTRO 2: Palabras negativas
-                        if any(neg in titulo.lower() for neg in PALABRAS_NEGATIVAS):
-                            continue
-
-                        if es_nuevo(link, titulo, precio_texto, precio_numerico):
-                            print(f"✨ ¡OFERTA VALIDADA!: {titulo} por {precio_texto}")
-                            enviar_push(titulo.upper(), precio_texto, link)
-                    except:
-                        continue
-            except Exception as e:
-                print(f"⚠️ Error en búsqueda: {e}")
+        stealth_sync(page)
         
-        browser.close()
+        try:
+            page.goto(URL_BUSQUEDA, wait_until="networkidle", timeout=60000)
+            # Esperamos a que carguen los contenedores de productos
+            page.wait_for_selector('div[style*="max-width: 381px"]', timeout=20000)
+            
+            # Capturamos todos los elementos que parecen ofertas
+            ofertas = page.query_selector_all('div[style*="max-width: 381px"]')
+            log(f"🔎 Se encontraron {len(ofertas)} elementos en la página.")
 
+            for oferta in ofertas[:15]: # Revisamos las 15 primeras para no saturar
+                try:
+                    texto = oferta.inner_text().split('\n')
+                    if len(texto) >= 2:
+                        precio_raw = texto[0]
+                        titulo = texto[1]
+                        
+                        # Limpiar precio para SQL
+                        precio_num = int(''.join(filter(str.isdigit, precio_raw)))
+                        
+                        # Obtener Link
+                        link_elem = oferta.query_selector('a')
+                        if link_elem:
+                            href = link_elem.get_attribute('href')
+                            url_completa = f"https://www.facebook.com{href.split('?')[0]}"
+                            id_item = url_completa.split('/')[-2]
+                            
+                            # Intentar guardar y notificar
+                            if guardar_oferta(id_item, titulo, precio_raw, precio_num):
+                                log(f"✨ ¡NUEVA OFERTA!: {titulo} por {precio_raw}")
+                                enviar_pushover(titulo, precio_raw, url_completa)
+                except:
+                    continue
+        except Exception as e:
+            log(f"⚠️ Error durante el escaneo: {e}")
+        finally:
+            browser.close()
+            log("😴 Escaneo finalizado. Esperando 5 minutos...")
+
+# --- EJECUCIÓN CONTINUA ---
 if __name__ == "__main__":
     inicializar_db()
-    print("🚀 Monitor LATAM v2.2 (Filtro de Precios Fantasía Activo)")
     while True:
-        monitorear()
-        print("😴 Esperando 5 minutos...")
-        time.sleep(300)
+        try:
+            escanear()
+        except Exception as e:
+            log(f"❌ Error crítico en el bucle: {e}")
+        time.sleep(300) # Pausa de 5 minutos
