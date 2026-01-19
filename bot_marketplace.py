@@ -89,43 +89,42 @@ def ejecutar_escaneo():
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+        # Añadimos un viewport más grande para ver más productos
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
         stealth_sync(page)
         
         try:
-            # Carga con tiempo de espera extendido
-            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=60000)
+            # 1. Navegar con tiempo de espera generoso
+            page.goto(URL_BUSQUEDA, wait_until="networkidle", timeout=90000)
             
-            # Scroll para activar la carga de productos (Lazy Load)
-            log("📜 Realizando scroll para cargar contenido...")
-            page.mouse.wheel(0, 800)
-            time.sleep(5)
+            # 2. Scroll progresivo para forzar la carga de imágenes y textos
+            log("📜 Realizando scroll progresivo...")
+            for _ in range(3):
+                page.mouse.wheel(0, 1000)
+                time.sleep(2)
             
-            # Intentar esperar a que aparezca cualquier texto con "$" (indica que hay precios)
-            page.wait_for_selector('span:has-text("$")', timeout=30000)
+            # 3. Selector Genérico: Buscamos enlaces que contienen la palabra 'item'
+            # Es mucho más estable que buscar por estilos de ancho (max-width)
+            selector_oferta = 'a[href*="/item/"]'
+            page.wait_for_selector(selector_oferta, timeout=45000)
             
-            # Selector más robusto: buscamos los enlaces que contienen las imágenes y textos
-            items = page.query_selector_all('div[role="main"] a[role="link"]')
-            
-            if not items:
-                # Fallback: intentar un selector alternativo si el primero falla
-                items = page.query_selector_all('div[style*="max-width"] a[href*="/item/"]')
-            
-            log(f"📊 {len(items)} posibles ofertas detectadas.")
+            items = page.query_selector_all(selector_oferta)
+            log(f"📊 {len(items)} enlaces de productos encontrados.")
 
             for item in items[:15]:
                 try:
-                    raw_text = item.inner_text().split('\n')
-                    # Buscamos un formato donde el precio suele ser el primer o segundo elemento
-                    if len(raw_text) < 2: continue
+                    # Buscamos el texto dentro del contenedor del enlace
+                    info = item.inner_text().split('\n')
+                    if len(info) < 2: continue
                     
-                    # El precio suele contener "$"
-                    precio_str = next((t for t in raw_text if "$" in t), None)
-                    # El nombre suele ser el texto largo después del precio
-                    nombre = next((t for t in raw_text if len(t) > 3 and "$" not in t), "Producto sin nombre")
+                    # Intentamos identificar el precio buscando el símbolo "$"
+                    precio_str = next((t for t in info if "$" in t), None)
+                    # El nombre suele ser el texto más largo o el que no tiene "$"
+                    nombre = next((t for t in info if len(t) > 5 and "$" not in t), info[1])
                     
                     if not precio_str: continue
                     
@@ -134,7 +133,7 @@ def ejecutar_escaneo():
                     href = item.get_attribute('href')
                     if href:
                         clean_url = f"https://www.facebook.com{href.split('?')[0]}"
-                        item_id = clean_url.split('/')[-2] if '/item/' in clean_url else clean_url.split('/')[-1]
+                        item_id = clean_url.split('/')[-2]
                         
                         if guardar_oferta(item_id, nombre, precio_str, precio_int):
                             log(f"✅ ¡NUEVO!: {nombre} ({precio_str})")
@@ -142,7 +141,7 @@ def ejecutar_escaneo():
                 except: continue
                 
         except Exception as e:
-            log(f"⚠️ Error de navegación: {e}")
+            log(f"⚠️ No se detectaron productos en esta ronda: {e}")
         finally:
             browser.close()
             log("😴 Fin de ronda. Esperando 5 minutos...")
