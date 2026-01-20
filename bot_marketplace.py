@@ -6,20 +6,28 @@ import re
 import random
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
+from dotenv import load_dotenv
+
+# Cargar variables de entorno del archivo .env
+load_dotenv()
 
 # --- CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
 LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
 
-# --- TUS PROXIES DE WEBSHARE ---
+# --- CONFIGURACIÓN DE PROXIES (Webshare) ---
 PROXIES_WEBSHARE = [
     "142.111.48.253:7030", "23.95.150.145:6114", "198.23.239.134:6540",
     "107.172.163.27:6543", "198.105.121.200:6462", "64.137.96.74:6641",
     "84.247.60.125:6095", "216.10.27.159:6837", "23.26.71.145:5628",
     "23.27.208.120:5830"
 ]
-PROXY_AUTH = {"user": "agfizjph", "pass": "y375ph2ovvo2"}
+# Credenciales leídas desde el .env con valores de respaldo (fallback)
+PROXY_AUTH = {
+    "user": os.getenv("PROXY_USER", "agfizjph"),
+    "pass": os.getenv("PROXY_PASS", "y375ph2ovvo2")
+}
 
 def log(mensaje):
     timestamp = time.strftime("%H:%M:%S")
@@ -30,7 +38,7 @@ def log(mensaje):
             f.write(texto + "\n")
     except: pass
 
-# --- VARIABLES DE ENTORNO ---
+# --- VARIABLES DE ENTORNO (Pushover) ---
 USER_KEY = os.getenv("USER_KEY")
 API_TOKEN = os.getenv("API_TOKEN")
 PRODUCTO = "bicicleta"
@@ -68,7 +76,7 @@ def ejecutar_escaneo():
         try:
             page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=120000)
             log("🌐 Contenido recibido. Procesando...")
-            time.sleep(15) # Tiempo para renderizado dinámico
+            time.sleep(15) 
             
             page.mouse.wheel(0, 1500)
             time.sleep(5)

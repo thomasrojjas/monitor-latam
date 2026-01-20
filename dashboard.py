@@ -3,12 +3,16 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- CONFIGURACIÓN APP ---
 st.set_page_config(page_title="Monitor Latam", page_icon="🚲", layout="centered")
 
 # --- SEGURIDAD ---
-ADMIN_PASSWORD = "1234" # Cambia esto por tu clave preferida
+# Usa la contraseña del .env o '1234' por defecto
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1234")
 
 st.markdown("""
     <style>
@@ -18,7 +22,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Login simple
+# Login simple en barra lateral
 user_pass = st.sidebar.text_input("Ingresa la clave", type="password")
 
 if user_pass != ADMIN_PASSWORD:
@@ -47,6 +51,7 @@ if os.path.exists(DB_PATH):
 
     st.subheader("📋 Últimos Hallazgos")
     if not df.empty:
+        # Mostramos ID y fecha para el historial
         st.dataframe(df[['id', 'fecha_deteccion']], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos nuevos aún.")
