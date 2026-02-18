@@ -1,42 +1,45 @@
-import streamlit as st
-import sqlite3
-import pandas as pd
 import os
+import sqlite3
 from datetime import datetime
+
+import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- CONFIGURACIÓN APP ---
 st.set_page_config(page_title="Monitor Latam", page_icon="🚲", layout="centered")
 
-# --- SEGURIDAD ---
-# Usa la contraseña del .env o '1234' por defecto
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1234")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
-st.markdown("""
+st.markdown(
+    """
     <style>
     .stApp { background-color: #0E1117; }
     [data-testid="stMetricValue"] { color: #00FFAA; font-size: 2.5rem; }
     .stDataFrame { border: 1px solid #30363d; border-radius: 10px; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# Login simple en barra lateral
 user_pass = st.sidebar.text_input("Ingresa la clave", type="password")
+
+if not ADMIN_PASSWORD:
+    st.error("Define ADMIN_PASSWORD en tu .env para habilitar el panel.")
+    st.stop()
 
 if user_pass != ADMIN_PASSWORD:
     st.title("🔐 Acceso Privado")
     st.warning("Introduce la contraseña en el menú lateral para ver las ofertas.")
     st.stop()
 
-# --- PANEL DE DATOS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
-LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
+DB_PATH = os.path.join(BASE_DIR, "marketplace_monitor.db")
+LOG_FILE = os.path.join(BASE_DIR, "bot_log.txt")
 
 st.title("🚲 Monitor Marketplace")
-st.write("Estado: 🟢 Operando con Proxies Residenciales")
+st.write("Estado: 🟢 Operando")
 
 if os.path.exists(DB_PATH):
     conn = sqlite3.connect(DB_PATH)
@@ -45,14 +48,15 @@ if os.path.exists(DB_PATH):
 
     c1, c2 = st.columns(2)
     c1.metric("Total Detectado", len(df))
-    hoy = datetime.now().strftime('%Y-%m-%d')
-    nuevas = len(df[df['fecha_deteccion'].str.contains(hoy)]) if not df.empty else 0
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    nuevas = len(df[df["fecha_deteccion"].str.contains(hoy)]) if not df.empty else 0
     c2.metric("Nuevas Hoy", nuevas)
 
     st.subheader("📋 Últimos Hallazgos")
     if not df.empty:
-        # Mostramos ID y fecha para el historial
-        st.dataframe(df[['id', 'fecha_deteccion']], use_container_width=True, hide_index=True)
+        default_columns = ["id", "search_term", "fecha_deteccion", "url"]
+        columns = [column for column in default_columns if column in df.columns]
+        st.dataframe(df[columns], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos nuevos aún.")
 else:
@@ -60,8 +64,8 @@ else:
 
 with st.expander("📄 Ver Logs del Sistema"):
     if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            st.text(f.read()[-1500:])
+        with open(LOG_FILE, "r", encoding="utf-8") as file:
+            st.text(file.read()[-1500:])
 
 if st.button("🔄 Actualizar Datos"):
     st.rerun()

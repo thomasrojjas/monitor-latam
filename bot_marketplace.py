@@ -1,113 +1,200 @@
 import os
-import time
-import sqlite3
-import requests
-import re
 import random
+import re
+import sqlite3
+import time
+from datetime import datetime
+from typing import Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote_plus
+
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
-from dotenv import load_dotenv
 
-# Cargar variables de entorno del archivo .env
 load_dotenv()
 
-# --- CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'marketplace_monitor.db')
-LOG_FILE = os.path.join(BASE_DIR, 'bot_log.txt')
+DB_PATH = os.path.join(BASE_DIR, "marketplace_monitor.db")
+LOG_FILE = os.path.join(BASE_DIR, "bot_log.txt")
 
-# --- CONFIGURACIÓN DE PROXIES (Webshare) ---
-PROXIES_WEBSHARE = [
-    "142.111.48.253:7030", "23.95.150.145:6114", "198.23.239.134:6540",
-    "107.172.163.27:6543", "198.105.121.200:6462", "64.137.96.74:6641",
-    "84.247.60.125:6095", "216.10.27.159:6837", "23.26.71.145:5628",
-    "23.27.208.120:5830"
+DEFAULT_PROXIES = [
+    "142.111.48.253:7030",
+    "23.95.150.145:6114",
+    "198.23.239.134:6540",
+    "107.172.163.27:6543",
+    "198.105.121.200:6462",
+    "64.137.96.74:6641",
+    "84.247.60.125:6095",
+    "216.10.27.159:6837",
+    "23.26.71.145:5628",
+    "23.27.208.120:5830",
 ]
-# Credenciales leídas desde el .env con valores de respaldo (fallback)
+
+SEARCH_TERMS = [
+    term.strip() for term in os.getenv("SEARCH_TERMS", "bicicleta").split(",") if term.strip()
+]
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+MAX_ITEMS_PER_SCAN = int(os.getenv("MAX_ITEMS_PER_SCAN", "10"))
+
+PROXIES_WEBSHARE = [
+    proxy.strip() for proxy in os.getenv("PROXIES_WEBSHARE", ",".join(DEFAULT_PROXIES)).split(",") if proxy.strip()
+]
 PROXY_AUTH = {
-    "user": os.getenv("PROXY_USER", "agfizjph"),
-    "pass": os.getenv("PROXY_PASS", "y375ph2ovvo2")
+    "user": os.getenv("PROXY_USER"),
+    "pass": os.getenv("PROXY_PASS"),
 }
 
-def log(mensaje):
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def log(mensaje: str) -> None:
     timestamp = time.strftime("%H:%M:%S")
     texto = f"[{timestamp}] {mensaje}"
     print(texto, flush=True)
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(texto + "\n")
-    except: pass
+        with open(LOG_FILE, "a", encoding="utf-8") as file:
+            file.write(texto + "\n")
+    except OSError as exc:
+        print(f"[{timestamp}] ⚠️ No se pudo escribir log: {exc}", flush=True)
 
-# --- VARIABLES DE ENTORNO (Pushover) ---
-USER_KEY = os.getenv("USER_KEY")
-API_TOKEN = os.getenv("API_TOKEN")
-PRODUCTO = "bicicleta"
-URL_BUSQUEDA = f"https://www.facebook.com/marketplace/search/?query={PRODUCTO}"
 
-def inicializar_db():
+def get_proxy_config() -> Optional[dict]:
+    if not PROXIES_WEBSHARE:
+        return None
+    server = random.choice(PROXIES_WEBSHARE)
+    proxy = {"server": f"http://{server}"}
+    if PROXY_AUTH["user"] and PROXY_AUTH["pass"]:
+        proxy["username"] = PROXY_AUTH["user"]
+        proxy["password"] = PROXY_AUTH["pass"]
+    return proxy
+
+
+def inicializar_db() -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS ofertas 
-                      (id TEXT PRIMARY KEY, titulo TEXT, precio TEXT, 
-                       precio_num INTEGER, fecha_deteccion DATETIME)''')
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ofertas (
+            id TEXT PRIMARY KEY,
+            titulo TEXT,
+            precio TEXT,
+            precio_num INTEGER,
+            fecha_deteccion DATETIME,
+            search_term TEXT,
+            url TEXT
+        )
+        """
+    )
+
+    # Migración simple para bases ya creadas
+    existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(ofertas)").fetchall()}
+    if "search_term" not in existing_columns:
+        cursor.execute("ALTER TABLE ofertas ADD COLUMN search_term TEXT")
+    if "url" not in existing_columns:
+        cursor.execute("ALTER TABLE ofertas ADD COLUMN url TEXT")
+
     conn.commit()
     conn.close()
 
-def ejecutar_escaneo():
-    proxy_elegido = random.choice(PROXIES_WEBSHARE)
-    log(f"🔎 Escaneo iniciado con Proxy: {proxy_elegido}")
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            proxy={
-                "server": f"http://{proxy_elegido}",
-                "username": PROXY_AUTH["user"],
-                "password": PROXY_AUTH["pass"]
-            }
+
+def build_search_url(search_term: str) -> str:
+    return f"https://www.facebook.com/marketplace/search/?query={quote_plus(search_term)}"
+
+
+def extraer_ids(html_content: str) -> Sequence[str]:
+    return sorted(set(re.findall(r"item/(\d{10,})", html_content)))
+
+
+def guardar_items(search_term: str, item_ids: Iterable[str]) -> int:
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    payload: List[Tuple[str, str, str, int, str, str, str]] = []
+
+    for item_id in item_ids:
+        listing_url = f"https://www.facebook.com/marketplace/item/{item_id}"
+        payload.append(
+            (
+                item_id,
+                f"{search_term.title()} {item_id}",
+                "Ver Link",
+                0,
+                timestamp,
+                search_term,
+                listing_url,
+            )
         )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800}
-        )
+
+    if not payload:
+        return 0
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    inserted = 0
+
+    for row in payload:
+        try:
+            cursor.execute(
+                """
+                INSERT INTO ofertas (id, titulo, precio, precio_num, fecha_deteccion, search_term, url)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                row,
+            )
+            inserted += 1
+        except sqlite3.IntegrityError:
+            continue
+
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def ejecutar_escaneo(search_term: str) -> None:
+    search_url = build_search_url(search_term)
+    proxy = get_proxy_config()
+    proxy_label = proxy["server"] if proxy else "sin proxy"
+    log(f"🔎 Escaneo iniciado [{search_term}] con {proxy_label}")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, proxy=proxy)
+        context = browser.new_context(user_agent=USER_AGENT, viewport={"width": 1280, "height": 800})
         page = context.new_page()
         stealth_sync(page)
-        
+
         try:
-            page.goto(URL_BUSQUEDA, wait_until="domcontentloaded", timeout=120000)
-            log("🌐 Contenido recibido. Procesando...")
-            time.sleep(15) 
-            
+            page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
+            log(f"🌐 [{search_term}] Contenido recibido. Procesando...")
+            time.sleep(15)
             page.mouse.wheel(0, 1500)
             time.sleep(5)
-            
-            html_content = page.content()
-            items_encontrados = re.findall(r'item/(\d{10,})', html_content)
-            items_unicos = list(set(items_encontrados))
-            
-            log(f"📊 IDs detectados: {len(items_unicos)}")
 
-            if len(items_unicos) > 0:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                for item_id in items_unicos[:10]:
-                    try:
-                        cursor.execute("INSERT INTO ofertas VALUES (?,?,?,?,?)", 
-                                     (item_id, f"Bicicleta {item_id}", "Ver Link", 0, time.strftime('%Y-%m-%d %H:%M:%S')))
-                        conn.commit()
-                        log(f"✅ REGISTRADO: {item_id}")
-                    except sqlite3.IntegrityError: pass 
-                conn.close()
-                
-        except Exception as e:
-            log(f"⚠️ Error en ronda: {e}")
+            ids = extraer_ids(page.content())
+            log(f"📊 [{search_term}] IDs detectados: {len(ids)}")
+            nuevos = guardar_items(search_term, ids[:MAX_ITEMS_PER_SCAN])
+            log(f"✅ [{search_term}] Nuevos registros: {nuevos}")
+        except Exception as exc:
+            log(f"⚠️ [{search_term}] Error en ronda: {exc}")
         finally:
+            context.close()
             browser.close()
-            log("😴 Fin de ronda.")
+            log(f"😴 [{search_term}] Fin de ronda.")
+
+
+def main() -> None:
+    inicializar_db()
+    log(f"🚀 BOT ACTIVADO | búsquedas={SEARCH_TERMS} | intervalo={SCAN_INTERVAL_SECONDS}s")
+
+    while True:
+        for term in SEARCH_TERMS:
+            try:
+                ejecutar_escaneo(term)
+            except Exception as exc:
+                log(f"❌ Error inesperado en término '{term}': {exc}")
+        time.sleep(SCAN_INTERVAL_SECONDS)
+
 
 if __name__ == "__main__":
-    inicializar_db()
-    log("🚀 BOT ACTIVADO")
-    while True:
-        ejecutar_escaneo()
-        time.sleep(300)
+    main()
