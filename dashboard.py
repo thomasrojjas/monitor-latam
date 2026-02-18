@@ -11,6 +11,7 @@ load_dotenv()
 st.set_page_config(page_title="Monitor Latam", page_icon="🚲", layout="centered")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+ALLOW_INSECURE_ADMIN_FALLBACK = os.getenv("ALLOW_INSECURE_ADMIN_FALLBACK", "false").lower() == "true"
 
 st.markdown(
     """
@@ -23,10 +24,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if not ADMIN_PASSWORD and ALLOW_INSECURE_ADMIN_FALLBACK:
+    ADMIN_PASSWORD = "1234"
+    st.sidebar.warning("Modo inseguro activo: usa ADMIN_PASSWORD en .env para producción.")
+
 user_pass = st.sidebar.text_input("Ingresa la clave", type="password")
 
 if not ADMIN_PASSWORD:
     st.error("Define ADMIN_PASSWORD en tu .env para habilitar el panel.")
+    st.code("ADMIN_PASSWORD=tu_clave_segura")
     st.stop()
 
 if user_pass != ADMIN_PASSWORD:

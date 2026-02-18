@@ -30,20 +30,6 @@ DEFAULT_PROXIES = [
     "23.27.208.120:5830",
 ]
 
-SEARCH_TERMS = [
-    term.strip() for term in os.getenv("SEARCH_TERMS", "bicicleta").split(",") if term.strip()
-]
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
-MAX_ITEMS_PER_SCAN = int(os.getenv("MAX_ITEMS_PER_SCAN", "10"))
-
-PROXIES_WEBSHARE = [
-    proxy.strip() for proxy in os.getenv("PROXIES_WEBSHARE", ",".join(DEFAULT_PROXIES)).split(",") if proxy.strip()
-]
-PROXY_AUTH = {
-    "user": os.getenv("PROXY_USER"),
-    "pass": os.getenv("PROXY_PASS"),
-}
-
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,6 +46,39 @@ def log(mensaje: str) -> None:
             file.write(texto + "\n")
     except OSError as exc:
         print(f"[{timestamp}] ⚠️ No se pudo escribir log: {exc}", flush=True)
+
+
+def parse_int_env(var_name: str, default: int, minimum: int = 1) -> int:
+    value = os.getenv(var_name, str(default)).strip()
+    try:
+        parsed = int(value)
+        if parsed < minimum:
+            raise ValueError
+        return parsed
+    except ValueError:
+        log(f"⚠️ Valor inválido para {var_name}='{value}'. Se usa {default}.")
+        return default
+
+
+def parse_csv_env(var_name: str, default_csv: str) -> List[str]:
+    raw = os.getenv(var_name, default_csv)
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    if values:
+        return values
+    fallback = [item.strip() for item in default_csv.split(",") if item.strip()]
+    log(f"⚠️ {var_name} vacío. Se usará valor por defecto: {fallback}")
+    return fallback
+
+
+SEARCH_TERMS = parse_csv_env("SEARCH_TERMS", "bicicleta")
+SCAN_INTERVAL_SECONDS = parse_int_env("SCAN_INTERVAL_SECONDS", default=300)
+MAX_ITEMS_PER_SCAN = parse_int_env("MAX_ITEMS_PER_SCAN", default=10)
+PROXIES_WEBSHARE = parse_csv_env("PROXIES_WEBSHARE", ",".join(DEFAULT_PROXIES))
+
+PROXY_AUTH = {
+    "user": os.getenv("PROXY_USER"),
+    "pass": os.getenv("PROXY_PASS"),
+}
 
 
 def get_proxy_config() -> Optional[dict]:
@@ -90,7 +109,6 @@ def inicializar_db() -> None:
         """
     )
 
-    # Migración simple para bases ya creadas
     existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(ofertas)").fetchall()}
     if "search_term" not in existing_columns:
         cursor.execute("ALTER TABLE ofertas ADD COLUMN search_term TEXT")
